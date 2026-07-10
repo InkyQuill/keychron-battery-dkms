@@ -48,6 +48,7 @@ class LinkProtocolTests(unittest.TestCase):
     def test_rejects_truncated_wrong_command_and_trailing_garbage(self):
         for decoder, packet in (
             (decode_receiver_version, b"\xb1"),
+            (decode_receiver_version, b"\xb1" + bytes(32)),
             (decode_receiver_state, bytes(31)),
             (decode_receiver_firmware, b"\xb2" + bytes(31)),
             (decode_state_notification, b"\x54\xe2\x01"),

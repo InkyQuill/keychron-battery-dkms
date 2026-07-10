@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.keychron_link.discovery import (
     DiscoveryError,
@@ -86,6 +87,38 @@ class LinkDiscoveryTests(unittest.TestCase):
             found = discover_keychron_links(root / "class" / "hidraw")
             with self.assertRaises(DiscoveryError):
                 find_status_channel(found)
+
+    def test_discovery_skips_entry_that_disappears_and_keeps_valid_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_hidraw(root, "hidraw1", STATUS_USAGE, 1)
+            self.make_hidraw(root, "hidraw2", STATUS_USAGE, 2)
+            disappearing = next(
+                (root / "devices").glob("1-10:1.1/*/uevent")
+            )
+            disappearing.unlink()
+
+            found = discover_keychron_links(root / "class" / "hidraw")
+
+            self.assertEqual([value.device_path.name for value in found], ["hidraw2"])
+
+    def test_discovery_skips_permission_error_and_keeps_valid_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_hidraw(root, "hidraw1", STATUS_USAGE, 1)
+            self.make_hidraw(root, "hidraw2", STATUS_USAGE, 2)
+            denied = next((root / "devices").glob("1-10:1.1/*/uevent"))
+            original_read_text = Path.read_text
+
+            def read_text(path, *args, **kwargs):
+                if path == denied:
+                    raise PermissionError("synthetic unreadable sysfs entry")
+                return original_read_text(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", new=read_text):
+                found = discover_keychron_links(root / "class" / "hidraw")
+
+            self.assertEqual([value.device_path.name for value in found], ["hidraw2"])
 
 
 if __name__ == "__main__":

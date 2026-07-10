@@ -42,28 +42,31 @@ def discover_keychron_links(
 ) -> tuple[HidrawInterface, ...]:
     interfaces = []
     for entry in sorted(sys_class.iterdir()):
-        hid_device = (entry / "device").resolve()
-        identity = _hid_identity((hid_device / "uevent").read_text())
-        if identity is None:
-            continue
+        try:
+            hid_device = (entry / "device").resolve()
+            identity = _hid_identity((hid_device / "uevent").read_text())
+            if identity is None:
+                continue
 
-        vid, pid = identity
-        if vid != KEYCHRON_VENDOR_ID or pid not in KEYCHRON_LINK_PRODUCT_IDS:
-            continue
+            vid, pid = identity
+            if vid != KEYCHRON_VENDOR_ID or pid not in KEYCHRON_LINK_PRODUCT_IDS:
+                continue
 
-        interfaces.append(
-            HidrawInterface(
-                device_path=Path("/dev") / entry.name,
-                sysfs_path=hid_device,
-                vid=vid,
-                pid=pid,
-                interface_number=int(
-                    (hid_device.parent / "bInterfaceNumber").read_text().strip(),
-                    16,
-                ),
-                report_descriptor=(hid_device / "report_descriptor").read_bytes(),
+            interfaces.append(
+                HidrawInterface(
+                    device_path=Path("/dev") / entry.name,
+                    sysfs_path=hid_device,
+                    vid=vid,
+                    pid=pid,
+                    interface_number=int(
+                        (hid_device.parent / "bInterfaceNumber").read_text().strip(),
+                        16,
+                    ),
+                    report_descriptor=(hid_device / "report_descriptor").read_bytes(),
+                )
             )
-        )
+        except OSError:
+            continue
     return tuple(interfaces)
 
 

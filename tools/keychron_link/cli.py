@@ -2,8 +2,11 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+import threading
 from typing import Callable, Iterable, TextIO
 
 from .discovery import (
@@ -19,7 +22,7 @@ from .protocol import (
     decode_receiver_state,
     decode_receiver_version,
 )
-from .transport import HidrawTransport, PacketRecord
+from .transport import HidrawTransport, PacketRecord, TransportError
 
 
 def capture_seconds(text: str) -> float:
@@ -36,7 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     subparsers.add_parser("list", help="list supported receiver interfaces")
-    subparsers.add_parser("info", help="read confirmed receiver information")
+    info = subparsers.add_parser("info", help="read confirmed receiver information")
+    info.add_argument(
+        "--output",
+        type=Path,
+        help="write the complete timestamped B1/B2/B3 transcript as JSONL",
+    )
     capture = subparsers.add_parser(
         "capture", help="passively capture raw and status traffic"
     )
@@ -79,19 +87,25 @@ def _matching_response(
 def _info_json(
     interfaces: tuple[HidrawInterface, ...],
     transport_factory: Callable[..., HidrawTransport],
+    record_sink: Callable[[PacketRecord], None] = lambda record: None,
 ) -> dict:
     raw = find_raw_channel(interfaces)
     transport = transport_factory(raw, channel="raw")
 
-    version = decode_receiver_version(
-        _matching_response(transport.exchange_confirmed_read(0xB1), 0xB1)
-    )
-    state = decode_receiver_state(
-        _matching_response(transport.exchange_confirmed_read(0xB2), 0xB2)
-    )
-    firmware = decode_receiver_firmware(
-        _matching_response(transport.exchange_confirmed_read(0xB3), 0xB3)
-    )
+    def confirmed_read(command: int) -> bytes:
+        try:
+            transcript = transport.exchange_confirmed_read(command)
+        except TransportError as error:
+            for record in error.transcript:
+                record_sink(record)
+            raise
+        for record in transcript:
+            record_sink(record)
+        return _matching_response(transcript, command)
+
+    version = decode_receiver_version(confirmed_read(0xB1))
+    state = decode_receiver_state(confirmed_read(0xB2))
+    firmware = decode_receiver_firmware(confirmed_read(0xB3))
     return {
         "feature_flags": list(version.feature_flags),
         "firmware": firmware.text,
@@ -107,37 +121,91 @@ def _info_json(
     }
 
 
-def _capture_records(
+def _record_json(record: PacketRecord) -> dict:
+    return {
+        "channel": record.channel,
+        "direction": record.direction,
+        "hex": record.data.hex(),
+        "timestamp_ns": record.timestamp_ns,
+    }
+
+
+def _write_record(output: TextIO, record: PacketRecord, *, durable: bool) -> None:
+    print(json.dumps(_record_json(record), sort_keys=True), file=output)
+    output.flush()
+    if durable:
+        os.fsync(output.fileno())
+
+
+def _finalize_capture(path: Path) -> None:
+    values = [json.loads(line) for line in path.read_text().splitlines()]
+    values.sort(key=lambda value: value["timestamp_ns"])
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary_path = Path(output.name)
+            for value in values:
+                print(json.dumps(value, sort_keys=True), file=output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _capture_to_path(
     interfaces: tuple[HidrawInterface, ...],
     seconds: float,
     transport_factory: Callable[..., HidrawTransport],
-) -> list[PacketRecord]:
+    path: Path,
+) -> None:
     raw = find_raw_channel(interfaces)
     status = find_status_channel(interfaces)
     transports = (
         transport_factory(raw, channel="raw"),
         transport_factory(status, channel="status"),
     )
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        captures = tuple(
-            executor.map(lambda transport: tuple(transport.capture(seconds)), transports)
-        )
-    return sorted(
-        (record for capture in captures for record in capture),
-        key=lambda record: record.timestamp_ns,
-    )
-
-
-def _write_capture(path: Path, records: Iterable[PacketRecord]) -> None:
     with path.open("w", encoding="utf-8") as output:
-        for record in records:
-            value = {
-                "channel": record.channel,
-                "direction": record.direction,
-                "hex": record.data.hex(),
-                "timestamp_ns": record.timestamp_ns,
-            }
-            print(json.dumps(value, sort_keys=True), file=output)
+        output.flush()
+        os.fsync(output.fileno())
+        lock = threading.Lock()
+
+        def capture(transport: HidrawTransport) -> None:
+            for record in transport.capture(seconds):
+                with lock:
+                    _write_record(output, record, durable=True)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(executor.submit(capture, transport) for transport in transports)
+            for future in futures:
+                future.result()
+    _finalize_capture(path)
+
+
+def _run_info(
+    interfaces: tuple[HidrawInterface, ...],
+    transport_factory: Callable[..., HidrawTransport],
+    path: Path | None,
+) -> dict:
+    if path is None:
+        return _info_json(interfaces, transport_factory)
+    with path.open("w", encoding="utf-8") as output:
+        output.flush()
+        os.fsync(output.fileno())
+        return _info_json(
+            interfaces,
+            transport_factory,
+            lambda record: _write_record(output, record, durable=True),
+        )
 
 
 def main(
@@ -161,14 +229,13 @@ def main(
         )
     elif args.action == "info":
         print(
-            json.dumps(_info_json(interfaces, transport_factory), sort_keys=True),
+            json.dumps(
+                _run_info(interfaces, transport_factory, args.output), sort_keys=True
+            ),
             file=stdout,
         )
     elif args.action == "capture":
-        _write_capture(
-            args.output,
-            _capture_records(interfaces, args.seconds, transport_factory),
-        )
+        _capture_to_path(interfaces, args.seconds, transport_factory, args.output)
     return 0
 
 

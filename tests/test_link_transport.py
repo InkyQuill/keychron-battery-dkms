@@ -7,7 +7,10 @@ from tools.keychron_link.discovery import HidrawInterface
 from tools.keychron_link.protocol import ProtocolError
 from tools.keychron_link.transport import (
     HidrawTransport,
+    TransportOpenError,
+    TransportReadError,
     TransportTimeout,
+    TransportWaitError,
     TransportWriteError,
 )
 
@@ -129,6 +132,59 @@ class LinkTransportTests(unittest.TestCase):
         self.assertTrue(all(record.direction == "in" for record in records))
         self.assertTrue(all(record.channel == "status" for record in records))
         self.closer.assert_called_once_with(42)
+
+    def test_exchange_wraps_open_oserror_with_empty_immutable_transcript(self):
+        self.opener.side_effect = PermissionError("denied")
+
+        with self.assertRaises(TransportOpenError) as caught:
+            self.transport().exchange_confirmed_read(0xB1)
+
+        self.assertEqual(caught.exception.transcript, ())
+        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+
+    def test_exchange_wraps_write_wait_and_read_oserrors_with_transcript(self):
+        request = b"\x00\xb1" + bytes(31)
+        cases = (
+            (self.writer, PermissionError("write denied"), TransportWriteError, []),
+            (self.waiter, OSError("wait failed"), TransportWaitError, [request]),
+            (self.reader, OSError("read failed"), TransportReadError, [request]),
+        )
+        for failing_mock, error, error_type, expected in cases:
+            with self.subTest(error_type=error_type.__name__):
+                self.setUp()
+                failing_mock = {
+                    TransportWriteError: self.writer,
+                    TransportWaitError: self.waiter,
+                    TransportReadError: self.reader,
+                }[error_type]
+                if error_type is TransportReadError:
+                    self.waiter.return_value = True
+                failing_mock.side_effect = error
+
+                with self.assertRaises(error_type) as caught:
+                    self.transport().exchange_confirmed_read(0xB1)
+
+                self.assertEqual(
+                    [record.data for record in caught.exception.transcript], expected
+                )
+                self.assertIsInstance(caught.exception.transcript, tuple)
+                self.assertIs(caught.exception.__cause__, error)
+
+    def test_capture_error_exposes_every_record_yielded_before_failure(self):
+        first = b"\x54\xe2" + bytes(19)
+        self.clock.side_effect = (0, 0, 1, 1)
+        self.waiter.side_effect = (True, True)
+        self.reader.side_effect = (first, OSError("device disappeared"))
+        capture = self.transport(channel="status").capture(duration=3e-9)
+
+        self.assertEqual(next(capture).data, first)
+        with self.assertRaises(TransportReadError) as caught:
+            next(capture)
+
+        self.assertEqual(
+            [record.data for record in caught.exception.transcript], [first]
+        )
+        self.assertIsInstance(caught.exception.transcript, tuple)
 
 
 if __name__ == "__main__":

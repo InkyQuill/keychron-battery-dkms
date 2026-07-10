@@ -31,6 +31,18 @@ The only active protocol operations were the three allowlisted receiver reads.
 Each request is exactly 32 bytes: the command at offset 0 followed by zeroes at
 offsets 1--31.
 
+The live `info --output` evidence records the actual hidraw write as 33 bytes:
+report ID `0x00`, followed by that 32-byte receiver request. The receiver input
+response is 32 bytes without the leading report-ID byte. The three exchanges
+were executed sequentially in `0xb1`, `0xb2`, `0xb3` order and produced these
+complete request/response pairs:
+
+| Command | Outbound hidraw bytes | Inbound response bytes |
+| --- | --- | --- |
+| `0xb1` | `00b100000000000000000000000000000000000000000000000000000000000000` | `b101000000000000000000000000000000000000000000000000000000000000` |
+| `0xb2` | `00b200000000000000000000000000000000000000000000000000000000000000` | `b201343460090100000000000000000000000000000000000000000000000000` |
+| `0xb3` | `00b300000000000000000000000000000000000000000000000000000000000000` | `b3642e332e30204a756e20203720323032342031323a33323a31380000000000` |
+
 | Command | 32-byte response layout | Live decoded result |
 | --- | --- | --- |
 | `0xb1` | offset 0 command; offsets 1--2 little-endian protocol version; offsets 3--4 feature bytes; offsets 5--31 reserved/zero in the observed response | version `1`, features `[0x00, 0x00]` |
@@ -106,13 +118,16 @@ The runtime evidence files are intentionally gitignored and are not committed:
 
 | File | Lines / bytes | SHA-256 |
 | --- | ---: | --- |
+| `artifacts/keychron-link/info.jsonl` | 6 / 885 | `76fec7d1246c02cea519531d0a8c49fef6964f0ff1339e3b70338fadc8401a87` |
 | `artifacts/keychron-link/baseline.jsonl` | 0 / 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | `artifacts/keychron-link/reconnect.jsonl` | 8 / 1092 | `5905736482d58029894b804ba627fad490ff5354a3ea3e863774dd10db5cfdf4` |
 
 Each nonempty JSONL record contains only a monotonic timestamp, direction,
-channel name, and hex-encoded vendor-channel report. Device metadata is recorded
-above. No normal keyboard interface, keycode, typed text, or arbitrary binary
-payload outside the two selected vendor channels is included.
+channel name, and hex-encoded vendor-channel report. `info.jsonl` is the active,
+timestamped B1/B2/B3 transcript shown above; the other two files are passive
+captures. Device metadata is recorded above. No normal keyboard interface,
+keycode, typed text, or arbitrary binary payload outside the two selected vendor
+channels is included.
 
 ## Kernel Go/No-Go Gate
 
