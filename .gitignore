@@ -20,3 +20,6 @@ src/
 *.swp
 .vscode/
 *.tar.gz
+
+# Isolated development worktrees
+.worktrees/
