@@ -23,3 +23,8 @@ src/
 
 # Isolated development worktrees
 .worktrees/
+
+# Python investigation tooling
+__pycache__/
+*.py[cod]
+/artifacts/keychron-link/
