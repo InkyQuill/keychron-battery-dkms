@@ -9,7 +9,18 @@ from .discovery import HidrawInterface
 from .protocol import build_receiver_request
 
 
-class TransportTimeout(TimeoutError):
+class TransportError(Exception):
+    def __init__(self, message: str, transcript=()) -> None:
+        super().__init__(message)
+        self.transcript = tuple(transcript)
+
+
+class TransportTimeout(TimeoutError, TransportError):
+    def __init__(self, message: str, transcript=()) -> None:
+        TransportError.__init__(self, message, transcript)
+
+
+class TransportWriteError(TransportError):
     pass
 
 
@@ -72,12 +83,22 @@ class HidrawTransport:
             request = b"\x00" + payload
             for _ in range(attempts):
                 deadline_ns = self._monotonic_ns() + timeout_ns
-                self._write(fd, request)
+                written = self._write(fd, request)
+                recorded_data = (
+                    request[:written]
+                    if isinstance(written, int) and written >= 0
+                    else b""
+                )
                 records.append(
                     PacketRecord(
-                        self._monotonic_ns(), "out", self._channel, request
+                        self._monotonic_ns(), "out", self._channel, recorded_data
                     )
                 )
+                if written != len(request):
+                    raise TransportWriteError(
+                        f"short write: expected {len(request)} bytes, wrote {written}",
+                        records,
+                    )
 
                 while True:
                     remaining_ns = deadline_ns - self._monotonic_ns()
@@ -103,7 +124,8 @@ class HidrawTransport:
             self._close(fd)
 
         raise TransportTimeout(
-            f"command 0x{command:02x} timed out after {attempts} attempts"
+            f"command 0x{command:02x} timed out after {attempts} attempts",
+            records,
         )
 
     def capture(self, duration: float) -> Iterator[PacketRecord]:

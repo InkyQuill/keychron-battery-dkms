@@ -5,7 +5,11 @@ from unittest.mock import Mock, call
 
 from tools.keychron_link.discovery import HidrawInterface
 from tools.keychron_link.protocol import ProtocolError
-from tools.keychron_link.transport import HidrawTransport, TransportTimeout
+from tools.keychron_link.transport import (
+    HidrawTransport,
+    TransportTimeout,
+    TransportWriteError,
+)
 
 
 class LinkTransportTests(unittest.TestCase):
@@ -65,6 +69,39 @@ class LinkTransportTests(unittest.TestCase):
 
         request = b"\x00\xb1" + bytes(31)
         self.assertEqual(self.writer.call_args_list, [call(42, request)] * 3)
+        self.closer.assert_called_once_with(42)
+
+    def test_timeout_preserves_outgoing_and_unmatched_packets(self):
+        notification = b"\xe2" + bytes(20)
+        self.waiter.side_effect = (True, False)
+        self.reader.return_value = notification
+
+        with self.assertRaises(TransportTimeout) as caught:
+            self.transport().exchange_confirmed_read(0xB2, attempts=1)
+
+        request = b"\x00\xb2" + bytes(31)
+        transcript = getattr(caught.exception, "transcript", None)
+        self.assertIsInstance(transcript, tuple)
+        self.assertEqual(
+            [record.data for record in transcript],
+            [request, notification],
+        )
+
+    def test_short_write_fails_immediately_and_preserves_transcript(self):
+        self.writer.return_value = 12
+        self.waiter.return_value = False
+
+        with self.assertRaises(TransportWriteError) as caught:
+            self.transport().exchange_confirmed_read(0xB3)
+
+        request = b"\x00\xb3" + bytes(31)
+        self.assertIsInstance(caught.exception.transcript, tuple)
+        self.assertEqual(
+            [record.data for record in caught.exception.transcript],
+            [request[:12]],
+        )
+        self.waiter.assert_not_called()
+        self.reader.assert_not_called()
         self.closer.assert_called_once_with(42)
 
     def test_transport_rejects_non_allowlisted_command_before_opening_device(self):
