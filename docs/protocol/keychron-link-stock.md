@@ -65,6 +65,21 @@ bytes were zero. The capture contains no normal keycode reports or typed text:
 all eight records are either the 21-byte `54 e2 ...` status form or the 32-byte
 `b2 ...` receiver-state form.
 
+### Observed packet-shape comparison
+
+The idle baseline contained no report boundary to compare. The reconnect file
+contained exactly the following two packet shapes; the full observed bytes are
+shown so that no omitted byte is inferred:
+
+| Channel | Length | Report / command byte | Disconnected observation | Connected observation | Changed byte | Connection-state correlation |
+| --- | ---: | --- | --- | --- | --- | --- |
+| status | 21 | report ID `0x54` at offset 0; kind `0xe2` at offset 1 | `54e201020000000000000000000000000000000000` (1 record) | `54e201010000000000000000000000000000000000` (3 records) | offset 3: `0x02` to `0x01`; every other byte was unchanged | Yes, for this single controlled off/on sequence |
+| raw | 32 | command `0xb2` at offset 0 | `b201343460090000000000000000000000000000000000000000000000000000` (2 records) | `b201343460090100000000000000000000000000000000000000000000000000` (2 records) | offset 6, the slot-0 connection flag: `0x00` to `0x01`; every other byte was unchanged | Yes, for this single controlled off/on sequence |
+
+The capture therefore has four unique byte strings but only two report shapes:
+one disconnected and one connected value for each shape. Duplicate boundaries
+do not add a second reconnect cycle.
+
 ## Battery Data Boundary
 
 No observed byte can be identified plausibly as capacity. The idle capture was
@@ -101,8 +116,19 @@ payload outside the two selected vendor channels is included.
 
 ## Kernel Go/No-Go Gate
 
-**NO-GO: stock capacity not yet retrievable.** The captures confirm receiver
-identity, metadata reads, and reconnect state, but do not demonstrate a stock
-battery percentage. Do not change the kernel driver until a `0--100` value is
-reproduced, agrees with the V6 Max Fn+B 10% bucket, tracks a later battery
-change, and does not interfere with keyboard input.
+**NO-GO: stock capacity not yet retrievable.** No observed field or confirmed
+read response is a capacity candidate, so the acceptance test fails as follows:
+
+| Acceptance criterion | Result | Missing evidence |
+| --- | --- | --- |
+| Integer in `0--100` | Fail | No field was identified as capacity; small connection-state values are not capacity candidates merely because they fall in this numeric range. |
+| Agrees with the keyboard's Fn+B 10% bucket | Fail | No observed field was correlated with the Fn+B indication. |
+| Reproduced after a second reconnect or later charge change | Fail | The evidence contains one off/on sequence and no later charge-change observation. Duplicate reports within that sequence are not an independent reproduction. |
+| Reading it does not interrupt normal keyboard input | Fail / untested | No capacity read exists to exercise while typing; the three ordinary key presses only show that passive vendor-channel capture recorded no keycode or text reports. |
+| Request, response matching, timing, and freshness specified byte-for-byte | Fail | There is no confirmed capacity request or response, so none of its matching, timing, or freshness rules can be specified. |
+
+The captures confirm receiver identity, metadata reads, and reconnect state, but
+they do not demonstrate a stock battery percentage. The next work is continued
+source or firmware analysis under a separately reviewed investigation plan, not
+a kernel implementation plan. Do not change the kernel driver until one field
+or confirmed read response satisfies all five criteria above.
